@@ -1,0 +1,165 @@
+import pyomo.environ as pyo
+import numpy as np
+import matplotlib.pyplot as plt
+
+##Declare model (to be used)
+m = pyo.ConcreteModel()
+
+##SET
+#SET I = all Units
+m.I = pyo.Set(initialize = ['ICE','Boiler1','Boiler2','HP'])
+m.I_f = pyo.Set(within = m.I, initialize = ['ICE','Boiler1','Boiler2'])
+m.I_el = pyo.Set(within = m.I, initialize = ['ICE'])
+m.I_th = pyo.Set(within = m.I, initialize = ['ICE','Boiler1','Boiler2','HP'])
+m.I_el_consum = pyo.Set(within = m.I, initialize = ['HP'])
+
+#SET T = all time instants (24 hs in a day)
+T = 24 #elemnts in the Set
+m.T= pyo.RangeSet(0,T-1)
+
+#Set S = all storages
+m.S = pyo.Set(initialize = ['TES','BAT'])
+m.S_el = pyo.Set(within = m.S, initialize = ['BAT'])
+m.S_th = pyo.Set(within = m.S, initialize = ['TES'])
+
+##Variables
+#Real Variables
+m.f = pyo.Var(m.I_f,m.T,domain = pyo.NonNegativeReals)
+m.q = pyo.Var(m.I_th,m.T,domain = pyo.NonNegativeReals)
+m.p = pyo.Var(m.I_el,m.T,domain = pyo.NonNegativeReals)
+m.el_in = pyo.Var(m.I_el_consum,m.T,domain = pyo.NonNegativeReals)
+
+#Binary
+m.z = pyo.Var(m.I,m.T,domain = pyo.Binary)
+m.dSU = pyo.Var(m.I,m.T,domain = pyo.Binary)
+
+#Related to storage
+m.u = pyo.Var(m.S,m.T,domain = pyo.NonNegativeReals)
+m.Charge = pyo.Var(m.S,m.T,domain = pyo.NonNegativeReals)
+m.Discharge = pyo.Var(m.S,m.T,domain = pyo.NonNegativeReals)
+
+#Electricity - Grid
+m.El_buy = pyo.Var(m.T,domain = pyo.NonNegativeReals)
+m.El_sell = pyo.Var(m.T,domain = pyo.NonNegativeReals)
+
+
+##Parameters [Data]
+
+d_el = [1371.7,1377.2,1369.9,1371.8,1378.8,1426.3,1508.9,1637.2,1930.8,2229.9,2163.1,2212.8,2224.6,2196.0,2247.3,2242.3,2220.8,2130.1,2192.6,1862.3,1547.5,1392.0,1344.4,1357.8]
+d_th = [2082.5,2291.6,2500.7,2605.3,3125.9,7500.0,5835.7,5938.1,5522.0,4478.7,4169.3,3958.0,3437.4,3439.5,3125.9,3123.8,3125.9,3125.9,3437.4,1354.9,938.8,1145.8,1352.8,1773.1]
+
+El_price_sell = [0.0561,0.0494,0.0457,0.0438,0.0431,0.0465,0.0550,0.0621,0.0750,0.0675,0.0602,0.0582,0.0562,0.0556,0.0561,0.0598,0.0630,0.0632,0.0667,0.0737,0.0746,0.0725,0.0632,0.0550]
+El_price_buy = [0.1272,0.1272,0.1272,0.1272,0.1272,0.1272,0.1272,0.1496,0.1514,0.1514,0.1514,0.1514,0.1514,0.1514,0.1514,0.1514,0.1514,0.1514,0.1514,0.1496,0.1496,0.1496,0.1496,0.1272]
+NG_price = 0.3
+Biomass_price = 0.025
+
+Fuel_cost = {'ICE':NG_price,'Boiler1':NG_price,'Boiler2':NG_price}
+a_th = {'ICE':0.439,'Boiler1':0.976,'Boiler2':0.945,'HP':3.590}
+b_th = {'ICE':-74.75,'Boiler1':-84.75,'Boiler2':-54.33,'HP':-51.28}
+a_el = {'ICE':0.49}
+b_el = {'ICE':-191.03}
+MinIn = {'ICE':1829.3,'Boiler1':662.1,'Boiler2':424.42,'HP':83.3}
+MaxIn = {'ICE':3658.5,'Boiler1':2648.3,'Boiler2':1697.70,'HP':641.0}
+RUlim = {'ICE':3658.5,'Boiler1':2648.3,'Boiler2':1697.70,'HP':641.0}
+Max_n_SU = {'ICE':T,'Boiler1':T,'Boiler2':T,'HP':T}
+OM_cost = {'ICE':9.46,'Boiler1':0,'Boiler2':0,'HP':13.28}
+SU_cost = {'ICE':8.45,'Boiler1':4,'Boiler2':2.56,'HP':9.13}
+
+MaxC = {'TES':0,'BAT':0}
+eta_ch ={'BAT':0.97}
+eta_disch = {'BAT':0.97}
+eta_diss = {'TES':0.995}
+
+##Obejctive Function
+def obj_func(m):
+    machine_fuel_cost = sum(Fuel_cost[i]*m.f[i,t] for i in m.I_f for t in m.T)
+    machine_OM_cost = sum(OM_cost[i]*m.z[i,t] for i in m.I for t in m.T)
+    machine_SU_cost = sum(SU_cost[i]*m.dSU[i,t] for i in m.I for t in m.T)
+    grid_SellBuy = sum(El_price_buy[t]*m.El_buy[t] - El_price_sell[t]*m.El_sell[t] for t in m.T)
+    return machine_fuel_cost + machine_OM_cost + machine_SU_cost + grid_SellBuy
+m.obj = pyo.Objective(rule = obj_func, sense = pyo.minimize)
+
+
+##Constrains
+#El balance
+def el_balance_rule(m,t):
+    return sum(m.p[i,t] for i in m.I_el) - sum(m.el_in[i,t] for i in m.I_el_consum) + m.El_buy[t] - m.El_sell[t] + sum(m.Discharge[s,t] for s in m.S_el) - sum(m.Charge[s,t] for s in m.S_el) == d_el[t]
+m.el_balance_con = pyo.Constraint(m.T, rule = el_balance_rule)
+
+#Th balance
+def th_balance_rule(m,t):
+    return sum(m.q[i,t] for i in m.I_th) + sum(m.Discharge[s,t] for s in m.S_th) - sum(m.Charge[s,t] for s in m.S_th) == d_th[t]
+m.th_balance_con = pyo.Constraint(m.T, rule = th_balance_rule)
+
+#El production
+def el_prod_rule(m,i,t):
+        return m.p[i,t] == a_el[i]*m.f[i,t] + b_el[i]*m.z[i,t]
+m.el_prod_con = pyo.Constraint(m.I_el, m.T, rule = el_prod_rule)
+
+#Th production
+def th_prod_rule(m,i,t):
+    if i in m.I_f:
+        return m.q[i,t] == a_th[i]*m.f[i,t] + b_th[i]*m.z[i,t]
+    elif i in m.I_el_consum:
+        return m.q[i,t] == a_th[i]*m.el_in[i,t] + b_th[i]*m.z[i,t]
+m.th_prod_con = pyo.Constraint(m.I_th, m.T, rule = th_prod_rule)
+
+#Operating Range Min
+def min_input_rule(m,i,t):
+    if i in m.I_f:
+        return m.f[i,t] >= MinIn[i]*m.z[i,t]
+    elif i in m.I_el_consum:
+        return m.el_in[i,t] >= MinIn[i]*m.z[i,t]
+m.min_input_con = pyo.Constraint(m.I, m.T,rule = min_input_rule)
+
+#Operating Range Max
+def max_input_rule(m,i,t):
+    if i in m.I_f:
+        return m.f[i,t] <= MaxIn[i]*m.z[i,t]
+    elif i in m.I_el_consum:
+        return m.el_in[i,t] <= MaxIn[i]*m.z[i,t]
+m.max_input_con = pyo.Constraint(m.I, m.T, rule = max_input_rule)
+
+#Logical SU
+def logical_SU_rule(m,i,t):
+    if t > 0:
+        return m.z[i,t] - m.z[i,t-1] <= m.dSU[i,t]
+    elif t == 0:
+        return m.z[i,0] - m.z[i,T-1] <= m.dSU[i,0]
+m.logical_SU_con = pyo.Constraint(m.I, m.T, rule = logical_SU_rule)
+
+#Ramp-Up limit
+def ramp_up_rule(m,i,t):
+    if i in m.I_f:
+        if t > 0:
+            return m.f[i,t] - m.f[i,t-1] <= RUlim[i]*m.z[i,t]
+        elif t == 0:
+            return m.f[i,0] - m.f[i,T-1] <= RUlim[i]*m.z[i,0]
+    elif i in m.I_el_consum:
+        if t > 0:
+            return m.el_in[i,t] - m.el_in[i,t-1] <= RUlim[i]*m.z[i,t]
+        elif t == 0:
+            return m.el_in[i,0] - m.el_in[i,T-1] <= RUlim[i]*m.z[i,0]  
+m.ramp_up_con = pyo.Constraint(m.I,m.T,rule = ramp_up_rule)
+
+#Th Storage Balance
+def th_storage_rule(m,s,t):
+    if t > 0:
+        return m.u[s,t] - m.u[s,t-1]*eta_diss[s] == m.Charge[s,t] - m.Discharge[s,t]    
+    elif t == 0:
+        return m.u[s,0] - m.u[s,T-1]*eta_diss[s] == m.Charge[s,0] - m.Discharge[s,0]  
+m.th_storage_con = pyo.Constraint(m.S_th,m.T, rule = th_storage_rule)
+
+#El Storage Balance
+def el_storage_rule(m,s,t):
+    if t > 0:
+        return m.u[s,t] - m.u[s,t-1] == m.Charge[s,t]*eta_ch[s] - m.Discharge[s,t]/eta_disch[s]    
+    elif t == 0:
+        return m.u[s,0] - m.u[s,T-1] == m.Charge[s,0]*eta_ch[s] - m.Discharge[s,0]/eta_disch[s]
+m.el_storage_con = pyo.Constraint(m.S_el,m.T, rule = el_storage_rule)
+    
+def Capacity_Rule(m,s,t):
+    return m.u[s,t] <= MaxC[s]
+m.Capacity_con = pyo.Constraint(m.S,m.T, rule = Capacity_Rule)
+
+pyo.SolverFactory('CBC',mipgap = 0.005).solve(m).write()
